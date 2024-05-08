@@ -130,6 +130,7 @@ pub mod bne;
 pub mod lb;
 pub mod lh;
 pub mod mul;
+pub mod mulhu;
 pub mod mulu;
 pub mod or;
 pub mod sb;

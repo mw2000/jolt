@@ -11,9 +11,9 @@ use crate::utils::instruction_utils::{
 };
 
 #[derive(Copy, Clone, Default, Debug)]
-pub struct MULInstruction<const WORD_SIZE: usize>(pub u64, pub u64);
+pub struct MULHUInstruction<const WORD_SIZE: usize>(pub u64, pub u64);
 
-impl<const WORD_SIZE: usize> JoltInstruction for MULInstruction<WORD_SIZE> {
+impl<const WORD_SIZE: usize> JoltInstruction for MULHUInstruction<WORD_SIZE> {
     fn operands(&self) -> [u64; 2] {
         [self.0, self.1]
     }
@@ -23,7 +23,7 @@ impl<const WORD_SIZE: usize> JoltInstruction for MULInstruction<WORD_SIZE> {
         concatenate_lookups(vals, C, log2(M) as usize)
     }
 
-    fn g_poly_degree(&self, C: usize) -> usize {
+    fn g_poly_degree(&self, _: usize) -> usize {
         1
     }
 
@@ -36,11 +36,11 @@ impl<const WORD_SIZE: usize> JoltInstruction for MULInstruction<WORD_SIZE> {
         vec![
             (
                 Box::new(TruncateOverflowSubtable::<F, WORD_SIZE>::new()),
-                SubtableIndices::from(0..msb_chunk_index + 1),
+                SubtableIndices::from(msb_chunk_index + 1..C),
             ),
             (
                 Box::new(IdentitySubtable::new()),
-                SubtableIndices::from(msb_chunk_index + 1..C),
+                SubtableIndices::from(0..msb_chunk_index + 1),
             ),
         ]
     }
@@ -52,13 +52,9 @@ impl<const WORD_SIZE: usize> JoltInstruction for MULInstruction<WORD_SIZE> {
 
     fn lookup_entry(&self) -> u64 {
         if WORD_SIZE == 32 {
-            let x = self.0 as i32;
-            let y = self.1 as i32;
-            x.wrapping_mul(y) as u32 as u64
+            (self.0 as u64).wrapping_mul(self.1 as u64) as u64 >> 32
         } else if WORD_SIZE == 64 {
-            let x = self.0 as i64;
-            let y = self.1 as i64;
-            x.wrapping_mul(y) as u64
+            ((self.0 as u128).wrapping_mul(self.1 as u128) as u128 >> 64) as u64
         } else {
             panic!("only implemented for u32 / u64")
         }
@@ -76,31 +72,31 @@ mod test {
     use ark_std::test_rng;
     use rand_chacha::rand_core::RngCore;
 
-    use super::MULInstruction;
+    use super::MULHUInstruction;
     use crate::{jolt::instruction::JoltInstruction, jolt_instruction_test};
 
     #[test]
-    fn mul_instruction_32_e2e() {
+    fn mulhu_instruction_32_e2e() {
         let mut rng = test_rng();
         const C: usize = 4;
         const M: usize = 1 << 16;
 
         for _ in 0..256 {
             let (x, y) = (rng.next_u32() as u64, rng.next_u32() as u64);
-            let instruction = MULInstruction::<32>(x, y);
+            let instruction = MULHUInstruction::<32>(x, y);
             jolt_instruction_test!(instruction);
         }
     }
 
     #[test]
-    fn mul_instruction_64_e2e() {
+    fn mulhu_instruction_64_e2e() {
         let mut rng = test_rng();
         const C: usize = 8;
         const M: usize = 1 << 16;
 
         for _ in 0..256 {
-            let (x, y) = (rng.next_u32() as u64, rng.next_u32() as u64);
-            let instruction = MULInstruction::<64>(x, y);
+            let (x, y) = (rng.next_u64(), rng.next_u64());
+            let instruction = MULHUInstruction::<64>(x, y);
             jolt_instruction_test!(instruction);
         }
     }
