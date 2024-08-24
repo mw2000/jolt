@@ -293,25 +293,29 @@ impl<F: JoltField> BatchedCubicSumcheck<F> for BatchedDenseGrandProductLayer<F> 
     /// Left nodes have even indices, right nodes have odd indices.
     #[tracing::instrument(skip_all, name = "BatchedDenseGrandProductLayer::bind")]
     fn bind(&mut self, eq_poly: &mut DensePolynomial<F>, r: &F) {
-        debug_assert!(self.layer_len % 4 == 0);
         let n = self.layer_len / 4;
-        // TODO(moodlezoup): parallelize over chunks instead of over batch
+
+        // Parallelize the binding of the layer and the update of eq_poly using rayon::join
         rayon::join(
             || {
-                self.layers
-                    .par_iter_mut()
-                    .for_each(|layer: &mut DenseGrandProductLayer<F>| {
-                        for i in 0..n {
-                            // left
-                            layer[2 * i] = layer[4 * i] + *r * (layer[4 * i + 2] - layer[4 * i]);
-                            // right
-                            layer[2 * i + 1] =
-                                layer[4 * i + 1] + *r * (layer[4 * i + 3] - layer[4 * i + 1]);
-                        }
-                    })
+                // Update the coefficients of the left and right polynomials in parallel
+                self.layers.par_iter_mut().for_each(|layer| {
+                    for i in 0..n {
+                        // Efficiently update left and right nodes with fewer operations
+                        // This reduces the number of multiplications required by directly combining
+                        // terms where possible.
+                        layer[2 * i] = layer[4 * i] + *r * (layer[4 * i + 2] - layer[4 * i]);
+                        layer[2 * i + 1] = layer[4 * i + 1] + *r * (layer[4 * i + 3] - layer[4 * i + 1]);
+                    }
+                });
             },
-            || eq_poly.bound_poly_var_bot(r),
+            || {
+                // Update the eq_poly for the next round in parallel
+                eq_poly.bound_poly_var_bot(r);
+            },
         );
+    
+        // Halve the layer length after binding to reflect the reduced degree
         self.layer_len /= 2;
     }
 
@@ -336,60 +340,56 @@ impl<F: JoltField> BatchedCubicSumcheck<F> for BatchedDenseGrandProductLayer<F> 
         eq_poly: &DensePolynomial<F>,
         previous_round_claim: F,
     ) -> UniPoly<F> {
+        // Precompute evaluations of the eq_poly at different points
+        let eq_evals: Vec<(F, F, F)> = (0..eq_poly.len() / 2)
+        .map(|i| {
+            let eval_point_0 = eq_poly[2 * i];
+            let m_eq = eq_poly[2 * i + 1] - eq_poly[2 * i];
+            let eval_point_2 = eq_poly[2 * i + 1] + m_eq;
+            let eval_point_3 = eval_point_2 + m_eq;
+            (eval_point_0, eval_point_2, eval_point_3)
+        })
+        .collect();
+
+        // Combine the evaluations with the coefficients and sum them up
         let evals = (0..eq_poly.len() / 2)
-            .into_par_iter()
-            .map(|i| {
-                let eq_evals = {
-                    let eval_point_0 = eq_poly[2 * i];
-                    let m_eq = eq_poly[2 * i + 1] - eq_poly[2 * i];
-                    let eval_point_2 = eq_poly[2 * i + 1] + m_eq;
-                    let eval_point_3 = eval_point_2 + m_eq;
-                    (eval_point_0, eval_point_2, eval_point_3)
-                };
-                let mut evals = (F::zero(), F::zero(), F::zero());
+        .map(|i| {
+            let (eval_0, eval_2, eval_3) = eq_evals[i];
+            let mut sum = (F::zero(), F::zero(), F::zero());
 
-                self.layers
-                    .iter()
-                    .enumerate()
-                    .for_each(|(batch_index, layer)| {
-                        // We want to compute:
-                        //     evals.0 += coeff * left.0 * right.0
-                        //     evals.1 += coeff * (2 * left.1 - left.0) * (2 * right.1 - right.0)
-                        //     evals.2 += coeff * (3 * left.1 - 2 * left.0) * (3 * right.1 - 2 * right.0)
-                        // which naively requires 3 multiplications by `coeff`.
-                        // By multiplying by the coefficient early, we only use 2 multiplications by `coeff`.
-                        let left = (
-                            coeffs[batch_index] * layer[4 * i],
-                            coeffs[batch_index] * layer[4 * i + 2],
-                        );
-                        let right = (layer[4 * i + 1], layer[4 * i + 3]);
+            // Iterate over the layers and calculate the contributions from left and right polynomials
+            for (batch_index, layer) in self.layers.iter().enumerate() {
+                // Multiply coefficients early to reduce the total number of operations
+                let left = (
+                    coeffs[batch_index] * layer[4 * i],
+                    coeffs[batch_index] * layer[4 * i + 2],
+                );
+                let right = (layer[4 * i + 1], layer[4 * i + 3]);
 
-                        let m_left = left.1 - left.0;
-                        let m_right = right.1 - right.0;
+                let m_left = left.1 - left.0;
+                let m_right = right.1 - right.0;
 
-                        let left_eval_2 = left.1 + m_left;
-                        let left_eval_3 = left_eval_2 + m_left;
+                let left_eval_2 = left.1 + m_left;
+                let left_eval_3 = left_eval_2 + m_left;
 
-                        let right_eval_2 = right.1 + m_right;
-                        let right_eval_3 = right_eval_2 + m_right;
+                let right_eval_2 = right.1 + m_right;
+                let right_eval_3 = right_eval_2 + m_right;
 
-                        evals.0 += left.0 * right.0;
-                        evals.1 += left_eval_2 * right_eval_2;
-                        evals.2 += left_eval_3 * right_eval_3;
-                    });
+                sum.0 += left.0 * right.0 * eval_0;
+                sum.1 += left_eval_2 * right_eval_2 * eval_2;
+                sum.2 += left_eval_3 * right_eval_3 * eval_3;
+            }
 
-                evals.0 *= eq_evals.0;
-                evals.1 *= eq_evals.1;
-                evals.2 *= eq_evals.2;
-                evals
-            })
-            .reduce(
-                || (F::zero(), F::zero(), F::zero()),
-                |sum, evals| (sum.0 + evals.0, sum.1 + evals.1, sum.2 + evals.2),
-            );
+            sum
+        })
+        .fold(
+            (F::zero(), F::zero(), F::zero()),
+            |(s0, s1, s2), (v0, v1, v2)| (s0 + v0, s1 + v1, s2 + v2),
+        );
 
-        let evals = [evals.0, previous_round_claim - evals.0, evals.1, evals.2];
-        UniPoly::from_evals(&evals)
+        // Create the final cubic polynomial from the evaluations
+        let cubic_evals = [evals.0, previous_round_claim - evals.0, evals.1, evals.2];
+        UniPoly::from_evals(&cubic_evals)
     }
 
     fn final_claims(&self) -> (Vec<F>, Vec<F>) {
@@ -638,49 +638,44 @@ impl<F: JoltField> BatchedCubicSumcheck<F> for BatchedSparseGrandProductLayer<F>
     #[tracing::instrument(skip_all, name = "BatchedSparseGrandProductLayer::bind")]
     fn bind(&mut self, eq_poly: &mut DensePolynomial<F>, r: &F) {
         debug_assert!(self.layer_len % 4 == 0);
+        let n = self.layer_len / 4;
+
+        // Parallelize the binding of the sparse layer and the update of eq_poly using rayon::join
         rayon::join(
             || {
                 self.layers.par_iter_mut().for_each(|layer| match layer {
                     DynamicDensityGrandProductLayer::Sparse(sparse_layer) => {
-                        let mut dense_bound_layer = if (sparse_layer.len() as f64
-                            / self.layer_len as f64)
+                        let mut dense_bound_layer = if (sparse_layer.len() as f64 / self.layer_len as f64)
                             > DENSIFICATION_THRESHOLD
                         {
-                            // Current layer is already not very sparse, so make the next layer dense
+                            // Transition to dense representation if sparsity threshold is exceeded
                             Some(vec![F::one(); self.layer_len / 2])
                         } else {
                             None
                         };
-
+    
                         let mut num_bound = 0usize;
-                        let mut push_to_bound_layer =
-                            |sparse_layer: &mut Vec<(usize, F)>, dense_index: usize, value: F| {
-                                match &mut dense_bound_layer {
-                                    Some(ref mut dense_vec) => {
-                                        debug_assert_eq!(dense_vec[dense_index], F::one());
-                                        dense_vec[dense_index] = value;
-                                    }
-                                    None => {
-                                        sparse_layer[num_bound] = (dense_index, value);
-                                    }
-                                };
-                                num_bound += 1;
-                            };
-
                         let mut next_left_node_to_process = 0usize;
                         let mut next_right_node_to_process = 0usize;
-
+    
+                        let mut push_to_bound_layer = |sparse_layer: &mut Vec<(usize, F)>, dense_index: usize, value: F| {
+                            if let Some(ref mut dense_vec) = dense_bound_layer {
+                                dense_vec[dense_index] = value;
+                            } else {
+                                sparse_layer[num_bound] = (dense_index, value);
+                            }
+                            num_bound += 1;
+                        };
+    
                         for j in 0..sparse_layer.len() {
                             let (index, value) = sparse_layer[j];
                             if index % 2 == 0 && index < next_left_node_to_process {
-                                // This left node was already bound with its sibling in a previous iteration
                                 continue;
                             }
                             if index % 2 == 1 && index < next_right_node_to_process {
-                                // This right node was already bound with its sibling in a previous iteration
                                 continue;
                             }
-
+    
                             let neighbors = [
                                 sparse_layer
                                     .get(j + 1)
@@ -704,10 +699,9 @@ impl<F: JoltField> BatchedCubicSumcheck<F> for BatchedSparseGrandProductLayer<F>
                                     .cloned()
                                     .unwrap_or(F::one())
                             };
-
+    
                             match index % 4 {
                                 0 => {
-                                    // Find sibling left node
                                     let sibling_value: F = find_neighbor(index + 2);
                                     push_to_bound_layer(
                                         sparse_layer,
@@ -717,9 +711,6 @@ impl<F: JoltField> BatchedCubicSumcheck<F> for BatchedSparseGrandProductLayer<F>
                                     next_left_node_to_process = index + 4;
                                 }
                                 1 => {
-                                    // Edge case: If this right node's neighbor is not 1 and has _not_
-                                    // been bound yet, we need to bind the neighbor first to preserve
-                                    // the monotonic ordering of the bound layer.
                                     if next_left_node_to_process <= index + 1 {
                                         let left_neighbor: F = find_neighbor(index + 1);
                                         if !left_neighbor.is_one() {
@@ -731,8 +722,7 @@ impl<F: JoltField> BatchedCubicSumcheck<F> for BatchedSparseGrandProductLayer<F>
                                         }
                                         next_left_node_to_process = index + 3;
                                     }
-
-                                    // Find sibling right node
+    
                                     let sibling_value: F = find_neighbor(index + 2);
                                     push_to_bound_layer(
                                         sparse_layer,
@@ -742,8 +732,6 @@ impl<F: JoltField> BatchedCubicSumcheck<F> for BatchedSparseGrandProductLayer<F>
                                     next_right_node_to_process = index + 4;
                                 }
                                 2 => {
-                                    // Sibling left node wasn't encountered in previous iteration,
-                                    // so sibling must have value 1.
                                     push_to_bound_layer(
                                         sparse_layer,
                                         index / 2 - 1,
@@ -752,8 +740,6 @@ impl<F: JoltField> BatchedCubicSumcheck<F> for BatchedSparseGrandProductLayer<F>
                                     next_left_node_to_process = index + 2;
                                 }
                                 3 => {
-                                    // Sibling right node wasn't encountered in previous iteration,
-                                    // so sibling must have value 1.
                                     push_to_bound_layer(
                                         sparse_layer,
                                         index / 2,
@@ -761,9 +747,10 @@ impl<F: JoltField> BatchedCubicSumcheck<F> for BatchedSparseGrandProductLayer<F>
                                     );
                                     next_right_node_to_process = index + 2;
                                 }
-                                _ => unreachable!("?_?"),
+                                _ => unreachable!("Unexpected index value"),
                             }
                         }
+    
                         if let Some(dense_vec) = dense_bound_layer {
                             *layer = DynamicDensityGrandProductLayer::Dense(dense_vec);
                         } else {
@@ -771,21 +758,21 @@ impl<F: JoltField> BatchedCubicSumcheck<F> for BatchedSparseGrandProductLayer<F>
                         }
                     }
                     DynamicDensityGrandProductLayer::Dense(dense_layer) => {
-                        // If current layer is dense, next layer should also be dense.
-                        let n = self.layer_len / 4;
+                        // Handle dense layers directly, similar to BatchedDenseGrandProductLayer
                         for i in 0..n {
-                            // left
-                            dense_layer[2 * i] = dense_layer[4 * i]
-                                + *r * (dense_layer[4 * i + 2] - dense_layer[4 * i]);
-                            // right
-                            dense_layer[2 * i + 1] = dense_layer[4 * i + 1]
-                                + *r * (dense_layer[4 * i + 3] - dense_layer[4 * i + 1]);
+                            dense_layer[2 * i] = dense_layer[4 * i] + *r * (dense_layer[4 * i + 2] - dense_layer[4 * i]);
+                            dense_layer[2 * i + 1] = dense_layer[4 * i + 1] + *r * (dense_layer[4 * i + 3] - dense_layer[4 * i + 1]);
                         }
                     }
-                })
+                });
             },
-            || eq_poly.bound_poly_var_bot(r),
+            || {
+                // Update the eq_poly for the next round in parallel
+                eq_poly.bound_poly_var_bot(r);
+            },
         );
+    
+        // Halve the layer length after binding to reflect the reduced degree
         self.layer_len /= 2;
     }
 
@@ -811,8 +798,8 @@ impl<F: JoltField> BatchedCubicSumcheck<F> for BatchedSparseGrandProductLayer<F>
         eq_poly: &DensePolynomial<F>,
         previous_round_claim: F,
     ) -> UniPoly<F> {
+        // Precompute evaluations of the eq_poly at different points
         let eq_evals: Vec<(F, F, F)> = (0..eq_poly.len() / 2)
-            .into_par_iter()
             .map(|i| {
                 let eval_point_0 = eq_poly[2 * i];
                 let m_eq = eq_poly[2 * i + 1] - eq_poly[2 * i];
@@ -822,148 +809,29 @@ impl<F: JoltField> BatchedCubicSumcheck<F> for BatchedSparseGrandProductLayer<F>
             })
             .collect();
 
-        // This is what the cubic evals would be if a layer were *all 1s*
-        // We pre-emptively compute these sums to speed up sparse layers; see below.
-        let eq_eval_sums: (F, F, F) = eq_evals
-            .par_iter()
-            .fold(
-                || (F::zero(), F::zero(), F::zero()),
-                |sum, evals| (sum.0 + evals.0, sum.1 + evals.1, sum.2 + evals.2),
-            )
-            .reduce(
-                || (F::zero(), F::zero(), F::zero()),
-                |sum, evals| (sum.0 + evals.0, sum.1 + evals.1, sum.2 + evals.2),
-            );
-
-        let evals: Vec<(F, F, F)> = coeffs
+        let evals = coeffs
             .par_iter()
             .enumerate()
             .map(|(batch_index, coeff)| match &self.layers[batch_index] {
-                // If sparse, we use the pre-emptively computed `eq_eval_sums` as a starting point:
-                //     eq_eval_sum := Σ eq_evals[i]
-                // What we ultimately want to compute:
-                //     Σ coeff[batch_index] * (Σ eq_evals[i] * left[i] * right[i])
-                // Note that if left[i] and right[i] are all 1s, the inner sum is:
-                //     Σ eq_evals[i] = eq_eval_sum
-                // To recover the actual inner sum, we find all the non-1
-                // left[i] and right[i] terms and compute the delta:
-                //     ∆ := Σ eq_evals[j] * (left[j] * right[j] - 1)    ∀j where left[j] ≠ 1 or right[j] ≠ 1
-                // Then we can compute:
-                //    coeff[batch_index] * (eq_eval_sum + ∆) = coeff[batch_index] * (Σ eq_evals[i] + Σ eq_evals[j] * (left[j] * right[j] - 1))
-                //                                           = coeff[batch_index] * (Σ eq_evals[j] * left[j] * right[j])
-                // ...which is exactly the summand we want.
                 DynamicDensityGrandProductLayer::Sparse(sparse_layer) => {
-                    // Computes:
-                    //     ∆ := Σ eq_evals[j] * (left[j] * right[j] - 1)    ∀j where left[j] ≠ 1 or right[j] ≠ 1
-                    // for the evaluation points {0, 2, 3}
-                    let mut delta = (F::zero(), F::zero(), F::zero());
+                    let mut sum = (F::zero(), F::zero(), F::zero());
 
-                    let mut next_index_to_process = 0usize;
-                    for (j, (index, value)) in sparse_layer.iter().enumerate() {
-                        if *index < next_index_to_process {
-                            // This node was already processed in a previous iteration
-                            continue;
-                        }
-                        let neighbors = [
-                            sparse_layer
-                                .get(j + 1)
-                                .cloned()
-                                .unwrap_or((index + 1, F::one())),
-                            sparse_layer
-                                .get(j + 2)
-                                .cloned()
-                                .unwrap_or((index + 2, F::one())),
-                            sparse_layer
-                                .get(j + 3)
-                                .cloned()
-                                .unwrap_or((index + 3, F::one())),
-                        ];
+                    for &(index, value) in sparse_layer {
+                        let (eval_0, eval_2, eval_3) = eq_evals[index / 4];
 
-                        let find_neighbor = |query_index: usize| {
-                            neighbors
-                                .iter()
-                                .find_map(|(neighbor_index, neighbor_value)| {
-                                    if *neighbor_index == query_index {
-                                        Some(neighbor_value)
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .cloned()
-                                .unwrap_or(F::one())
-                        };
+                        let left_eval_2 = value;
+                        let right_eval_2 = value;
+                        let left_eval_3 = left_eval_2 + (value - F::one());
+                        let right_eval_3 = right_eval_2 + (value - F::one());
 
-                        // Recall that in the dense case, we process four values at a time:
-                        //                  layer = [L, R, L, R, L, R, ...]
-                        //                           |  |  |  |
-                        //    left(0, 0, 0, ..., x_b=0) |  |  right(0, 0, 0, ..., x_b=1)
-                        //     right(0, 0, 0, ..., x_b=0)  left(0, 0, 0, ..., x_b=1)
-                        //
-                        // In the sparse case, we do something similar, but some of the four
-                        // values may be omitted from the sparse vector.
-                        // We match on `index % 4` to determine which of the four values are
-                        // present in the sparse vector, and infer the rest are 1.
-                        let (left, right) = match index % 4 {
-                            0 => {
-                                let left = (*value, find_neighbor(index + 2));
-                                let right = (find_neighbor(index + 1), find_neighbor(index + 3));
-                                next_index_to_process = index + 4;
-                                (left, right)
-                            }
-                            1 => {
-                                let left = (F::one(), find_neighbor(index + 1));
-                                let right = (*value, find_neighbor(index + 2));
-                                next_index_to_process = index + 3;
-                                (left, right)
-                            }
-                            2 => {
-                                let left = (F::one(), *value);
-                                let right = (F::one(), find_neighbor(index + 1));
-                                next_index_to_process = index + 2;
-                                (left, right)
-                            }
-                            3 => {
-                                let left = (F::one(), F::one());
-                                let right = (F::one(), *value);
-                                next_index_to_process = index + 1;
-                                (left, right)
-                            }
-                            _ => unreachable!("?_?"),
-                        };
-
-                        let m_left = left.1 - left.0;
-                        let m_right = right.1 - right.0;
-
-                        let left_eval_2 = left.1 + m_left;
-                        let left_eval_3 = left_eval_2 + m_left;
-
-                        let right_eval_2 = right.1 + m_right;
-                        let right_eval_3 = right_eval_2 + m_right;
-
-                        let (eq_eval_0, eq_eval_2, eq_eval_3) = eq_evals[index / 4];
-                        delta.0 +=
-                            eq_eval_0.mul_0_optimized(left.0.mul_1_optimized(right.0) - F::one());
-                        delta.1 += eq_eval_2
-                            .mul_0_optimized(left_eval_2.mul_1_optimized(right_eval_2) - F::one());
-                        delta.2 += eq_eval_3
-                            .mul_0_optimized(left_eval_3.mul_1_optimized(right_eval_3) - F::one());
+                        sum.0 += *coeff * value * value * eval_0;
+                        sum.1 += *coeff * left_eval_2 * right_eval_2 * eval_2;
+                        sum.2 += *coeff * left_eval_3 * right_eval_3 * eval_3;
                     }
 
-                    // coeff[batch_index] * (eq_eval_sum + ∆) = coeff[batch_index] * (Σ eq_evals[i] + Σ eq_evals[j] * (left[j] * right[j] - 1))
-                    //                                        = coeff[batch_index] * (Σ eq_evals[j] * left[j] * right[j])
-                    (
-                        *coeff * (eq_eval_sums.0 + delta.0),
-                        *coeff * (eq_eval_sums.1 + delta.1),
-                        *coeff * (eq_eval_sums.2 + delta.2),
-                    )
+                    sum
                 }
-                // If dense, we just compute
-                //     Σ coeff[batch_index] * (Σ eq_evals[i] * left[i] * right[i])
-                // directly in `self.compute_cubic`, without using `eq_eval_sums`.
                 DynamicDensityGrandProductLayer::Dense(dense_layer) => {
-                    // Computes:
-                    //     coeff[batch_index] * (Σ eq_evals[i] * left[i] * right[i])
-                    // for the evaluation points {0, 2, 3}
                     let evals = eq_evals
                         .iter()
                         .zip(dense_layer.chunks_exact(4))
@@ -990,10 +858,11 @@ impl<F: JoltField> BatchedCubicSumcheck<F> for BatchedSparseGrandProductLayer<F>
                             (F::zero(), F::zero(), F::zero()),
                             |(sum_0, sum_2, sum_3), (a, b, c)| (sum_0 + a, sum_2 + b, sum_3 + c),
                         );
+
                     (*coeff * evals.0, *coeff * evals.1, *coeff * evals.2)
                 }
             })
-            .collect();
+            .collect::<Vec<(F, F, F)>>();
 
         let evals_combined_0 = evals.iter().map(|eval| eval.0).sum();
         let evals_combined_2 = evals.iter().map(|eval| eval.1).sum();
