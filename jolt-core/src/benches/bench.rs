@@ -3,6 +3,7 @@ use crate::host;
 use crate::jolt::vm::rv32i_vm::{RV32IJoltVM, C, M};
 use crate::jolt::vm::Jolt;
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
+use crate::poly::commitment::dory::DoryCommitScheme;
 use crate::poly::commitment::hyperkzg::HyperKZG;
 use crate::poly::commitment::zeromorph::Zeromorph;
 use crate::utils::transcript::{KeccakTranscript, Transcript};
@@ -13,6 +14,7 @@ use serde::Serialize;
 pub enum PCSType {
     Zeromorph,
     HyperKZG,
+    Dory,
 }
 
 #[derive(Debug, Copy, Clone, clap::ValueEnum)]
@@ -54,6 +56,17 @@ pub fn benchmarks(
             }
             _ => panic!("BenchType does not have a mapping"),
         },
+        PCSType::Dory => match bench_type {
+            BenchType::Sha2 => sha2::<Fr, DoryCommitScheme<Bn254, KeccakTranscript>, KeccakTranscript>(),
+            BenchType::Sha3 => sha3::<Fr, DoryCommitScheme<Bn254, KeccakTranscript>, KeccakTranscript>(),
+            BenchType::Sha2Chain => {
+                sha2chain::<Fr, DoryCommitScheme<Bn254, KeccakTranscript>, KeccakTranscript>()
+            }
+            BenchType::Fibonacci => {
+                fibonacci::<Fr, DoryCommitScheme<Bn254, KeccakTranscript>, KeccakTranscript>()
+            }
+            _ => panic!("BenchType does not have a mapping"), 
+        }
         _ => panic!("PCS Type does not have a mapping"),
     }
 }
