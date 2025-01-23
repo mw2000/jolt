@@ -3,7 +3,7 @@ use crate::host;
 use crate::jolt::vm::rv32i_vm::{RV32IJoltVM, C, M};
 use crate::jolt::vm::Jolt;
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
-use crate::poly::commitment::dory::DoryCommitScheme;
+use crate::poly::commitment::dory::DoryScheme;
 use crate::poly::commitment::hyperkzg::HyperKZG;
 use crate::poly::commitment::zeromorph::Zeromorph;
 use crate::utils::transcript::{KeccakTranscript, Transcript};
@@ -57,16 +57,16 @@ pub fn benchmarks(
             _ => panic!("BenchType does not have a mapping"),
         },
         PCSType::Dory => match bench_type {
-            BenchType::Sha2 => sha2::<Fr, DoryCommitScheme<Fr, KeccakTranscript>, KeccakTranscript>(),
-            BenchType::Sha3 => sha3::<Fr, DoryCommitScheme<Fr, KeccakTranscript>, KeccakTranscript>(),
+            BenchType::Sha2 => sha2::<Fr, DoryScheme<G1Projective, KeccakTranscript>, KeccakTranscript>(),
+            BenchType::Sha3 => sha3::<Fr, DoryScheme<G1Projective, KeccakTranscript>, KeccakTranscript>(),
             BenchType::Sha2Chain => {
-                sha2chain::<Fr, DoryCommitScheme<Fr, KeccakTranscript>, KeccakTranscript>()
+                sha2chain::<Fr, DoryScheme<G1Projective, KeccakTranscript>, KeccakTranscript>()
             }
             BenchType::Fibonacci => {
-                fibonacci::<Fr, DoryCommitScheme<Fr, KeccakTranscript>, KeccakTranscript>()
+                fibonacci::<Fr, DoryScheme<G1Projective, KeccakTranscript>, KeccakTranscript>()
             }
-            _ => panic!("BenchType does not have a mapping"), 
-        }
+            _ => panic!("BenchType does not have a mapping"),
+        },
         _ => panic!("PCS Type does not have a mapping"),
     }
 }
