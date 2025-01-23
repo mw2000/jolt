@@ -57,13 +57,13 @@ pub fn benchmarks(
             _ => panic!("BenchType does not have a mapping"),
         },
         PCSType::Dory => match bench_type {
-            BenchType::Sha2 => sha2::<Fr, DoryCommitScheme<Bn254, KeccakTranscript>, KeccakTranscript>(),
-            BenchType::Sha3 => sha3::<Fr, DoryCommitScheme<Bn254, KeccakTranscript>, KeccakTranscript>(),
+            BenchType::Sha2 => sha2::<Fr, DoryCommitScheme<Fr, KeccakTranscript>, KeccakTranscript>(),
+            BenchType::Sha3 => sha3::<Fr, DoryCommitScheme<Fr, KeccakTranscript>, KeccakTranscript>(),
             BenchType::Sha2Chain => {
-                sha2chain::<Fr, DoryCommitScheme<Bn254, KeccakTranscript>, KeccakTranscript>()
+                sha2chain::<Fr, DoryCommitScheme<Fr, KeccakTranscript>, KeccakTranscript>()
             }
             BenchType::Fibonacci => {
-                fibonacci::<Fr, DoryCommitScheme<Bn254, KeccakTranscript>, KeccakTranscript>()
+                fibonacci::<Fr, DoryCommitScheme<Fr, KeccakTranscript>, KeccakTranscript>()
             }
             _ => panic!("BenchType does not have a mapping"), 
         }

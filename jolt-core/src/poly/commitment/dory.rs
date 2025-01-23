@@ -102,8 +102,15 @@ where
             .zip(setup.iter())
             .map(|(coeff, param)| *coeff * *param)
             .collect();
+        println!(
+            "Commitment: {:?}, Poly: {:?}, Setup: {:?}",
+            commitment_value,
+            poly.evals_ref(),
+            setup
+        );
         DoryCommitment { commitment_value }
     }
+    
 
     fn batch_commit(
         evals: &[&[Self::Field]],
@@ -180,13 +187,20 @@ where
                 .map(|(w, s)| *w * *s)
                 .collect(),
         };
-
+    
+        println!(
+            "Reconstructed Commitment: {:?}, Original Commitment: {:?}",
+            reconstructed_commitment, commitment
+        );
+    
         if reconstructed_commitment == *commitment && proof.eval == *opening {
             Ok(())
         } else {
             Err(ProofVerifyError::InternalError)
         }
     }
+    
+    
 
     fn batch_verify(
         batch_proof: &Self::BatchedProof,
@@ -208,14 +222,20 @@ where
                     .map(|s| *eval * *s)
                     .collect(),
             };
-
+    
+            println!(
+                "Batch Reconstructed Commitment: {:?}, Original Commitment: {:?}, Eval: {:?}, Opening: {:?}",
+                reconstructed_commitment, commitment, eval, opening
+            );
+    
             if &reconstructed_commitment != *commitment || eval != opening {
                 return Err(ProofVerifyError::InternalError);
             }
         }
         Ok(())
     }
-
+    
+    
     fn protocol_name() -> &'static [u8] {
         b"DoryCommitScheme"
     }
@@ -227,15 +247,23 @@ fn compute_witness<F: JoltField>(
 ) -> Vec<F> {
     let mut witness = poly.evals_ref().to_vec();
     for &p in point {
-        let mut temp = F::zero(); // Accumulator for intermediate results
+        println!("Processing point: {:?}", p);
         for j in (1..witness.len()).rev() {
-            temp = witness[j] * p + temp;
-            witness[j - 1] += temp;
+            let original = witness[j - 1];
+            let added = witness[j] * p;
+            witness[j - 1] += added;
+            println!(
+                "witness[{}] updated: {:?} (original: {:?}, added: {:?})",
+                j - 1,
+                witness[j - 1],
+                original,
+                added
+            );
         }
     }
+    println!("Final witness: {:?}", witness);
     witness
 }
-
 
 
 
@@ -250,17 +278,29 @@ mod tests {
     fn test_dory_single_open_and_verify() {
         type TestDoryCommitScheme = DoryCommitScheme<Fr, KeccakTranscript>;
 
+
+        // Ensure polynomial evaluations are a power of 2
+    
         // Ensure polynomial evaluations are a power of 2
         let poly = DensePolynomial::new(vec![Fr::from(1), Fr::from(2), Fr::from(3), Fr::from(4)]);
-        let point = vec![Fr::from(1)];
+        println!("Polynomial: {:?}", poly.evals_ref());
+        
+        let point = vec![Fr::from(2)];
+        println!("Point: {:?}", point);
+    
         let eval = poly.evaluate(&point);
-
+        println!("Expected Evaluation: {:?}", eval);
+    
         let setup = vec![Fr::from(3), Fr::from(2), Fr::from(1), Fr::from(4)];
+        println!("Setup: {:?}", setup);
+    
         let commitment = TestDoryCommitScheme::commit(&poly, &setup);
-
+        println!("Commitment: {:?}", commitment);
+    
         let mut transcript = KeccakTranscript::new(b"DoryTest");
         let proof = TestDoryCommitScheme::prove(&setup, &poly, &point, &mut transcript);
-
+        println!("Proof: {:?}", proof);
+    
         assert!(TestDoryCommitScheme::verify(
             &proof,
             &setup,
@@ -271,18 +311,19 @@ mod tests {
         )
         .is_ok());
     }
-
+    
     #[test]
     fn test_dory_batch_open_and_verify() {
         type TestDoryCommitScheme = DoryCommitScheme<Fr, KeccakTranscript>;
 
-        // Ensure polynomial evaluations are a power of 2
+        // Create univariate polynomials
         let polys = vec![
             DensePolynomial::new(vec![Fr::from(1), Fr::from(2), Fr::from(3), Fr::from(4)]),
             DensePolynomial::new(vec![Fr::from(5), Fr::from(6), Fr::from(7), Fr::from(8)]),
         ];
 
-        let point = vec![Fr::from(1)];
+        // Single point for univariate polynomials
+        let point = vec![Fr::from(2)];
         let setup = vec![Fr::from(3), Fr::from(2), Fr::from(1), Fr::from(4)];
 
         let commitments: Vec<_> = polys

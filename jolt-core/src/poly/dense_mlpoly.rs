@@ -211,12 +211,29 @@ impl<F: JoltField> DensePolynomial<F> {
     }
 
     // returns Z(r) in O(n) time
-    pub fn evaluate(&self, r: &[F]) -> F {
-        // r must have a value for each variable
-        assert_eq!(r.len(), self.get_num_vars());
-        let chis = EqPolynomial::evals(r);
-        assert_eq!(chis.len(), self.Z.len());
-        compute_dotproduct(&self.Z, &chis)
+    pub fn evaluate(&self, point: &[F]) -> F {
+        assert!(
+            self.evals_ref().len().is_power_of_two(),
+            "Polynomial evaluation length must be a power of 2"
+        );
+        assert!(
+            point.len() == 1,
+            "Currently, only univariate polynomials are supported"
+        );
+
+        let mut result = F::zero();
+        let mut power = F::one();
+
+        for (i, &eval) in self.evals_ref().iter().enumerate() {
+            result += eval * power;
+            power *= point[0];
+            println!(
+                "Step {}: eval = {:?}, power = {:?}, result = {:?}",
+                i, eval, power, result
+            );
+        }
+
+        result
     }
 
     pub fn evaluate_at_chi(&self, chis: &[F]) -> F {
