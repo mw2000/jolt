@@ -91,6 +91,8 @@ pub struct ReduceProverStep1Elements {
     pub d1_r: GT,
     pub d2_l: GT,
     pub d2_r: GT,
+
+    pub beta: Fr
 }
 
 impl AppendToTranscript for ReduceProverStep1Elements {
@@ -113,6 +115,7 @@ impl AppendToTranscript for ReduceProverStep1Elements {
 pub struct ReduceProverStep2Elements {
     pub c_plus: GT,
     pub c_minus: GT,
+    pub alpha: Fr
 }
 
 impl AppendToTranscript for ReduceProverStep2Elements {
@@ -134,6 +137,8 @@ impl AppendToTranscript for ReduceProverStep2Elements {
 pub struct ScalarProductProofElements {
     pub e1: G1,
     pub e2: G2,
+    // NEW FIELD: the final folded c in GT
+    pub final_c: GT,
 }
 
 impl AppendToTranscript for ScalarProductProofElements {
@@ -420,67 +425,87 @@ impl<TranscriptType: Transcript> CommitmentScheme<TranscriptType> for DoryScheme
 // ---------------------------------------------------------------------------
 
 // Instead of reusing your single-group reduce_prover, we define it for (v1 in G1, v2 in G2).
-fn reduce_prover<TranscriptType: Transcript>(
-    v1: &[G1],
-    v2: &[G2],
-    pp: &DoryPublicParams,
-    cmt: &DoryCommitment,
-    transcript: &mut TranscriptType
-) -> (Vec<ReduceProverStep1Elements>, Vec<ReduceProverStep2Elements>, ScalarProductProofElements)
+
+fn reduce_prover<ProofTranscript: Transcript>(
+    v1: &[G1],              // The witness vectors in G1
+    v2: &[G2],              // The witness vectors in G2
+    pp: &DoryPublicParams,  // Contains gamma1_prime, gamma2_prime, etc.
+    cmt: &DoryCommitment,   // Current (C, D1, D2) in GT
+    transcript: &mut ProofTranscript
+) -> (
+    Vec<ReduceProverStep1Elements>,
+    Vec<ReduceProverStep2Elements>,
+    ScalarProductProofElements
+)
 {
+    // If dimension=1 => final step is trivial
     let n = v1.len();
     if n == 1 {
-        // dimension=1 => final scalar product proof
-        let sp = scalar_product_prover_single(v1[0], v2[0], cmt, pp);
+        // Produce final "scalar product proof" => store e1=v1[0], e2=v2[0].
+        let sp = ScalarProductProofElements {
+            e1: v1[0],
+            e2: v2[0],
+            final_c: cmt.c
+        };
         return (vec![], vec![], sp);
     }
 
-    // split
-    let half = n/2;
-    let (v1l, v1r) = ( &v1[..half], &v1[half..] );
-    let (v2l, v2r) = ( &v2[..half], &v2[half..] );
+    // Split in half
+    let half = n / 2;
+    let (v1l, v1r) = (&v1[..half], &v1[half..]);
+    let (v2l, v2r) = (&v2[..half], &v2[half..]);
 
-    // Step1: 
-    // d1_l = product of e(v1l[i], gamma2_prime[i])
-    let mut d1l = GT::ONE;
-    let mut d1r = GT::ONE;
+    // Step1 partial: we compute d1_l, d1_r, d2_l, d2_r
+    let mut d1_l = GT::ONE;
+    let mut d1_r = GT::ONE;
     for i in 0..half {
-        d1l *= pair(v1l[i], pp.gamma2_prime[i]);
-        d1r *= pair(v1r[i], pp.gamma2_prime[i]);
+        d1_l *= pair(v1l[i], pp.gamma2_prime[i]);
+        d1_r *= pair(v1r[i], pp.gamma2_prime[i]);
     }
-    // d2_l = product of e(gamma1_prime[i], v2l[i])
-    let mut d2l = GT::ONE;
-    let mut d2r = GT::ONE;
+    let mut d2_l = GT::ONE;
+    let mut d2_r = GT::ONE;
     for i in 0..half {
-        d2l *= pair(pp.gamma1_prime[i], v2l[i]);
-        d2r *= pair(pp.gamma1_prime[i], v2r[i]);
+        d2_l *= pair(pp.gamma1_prime[i], v2l[i]);
+        d2_r *= pair(pp.gamma1_prime[i], v2r[i]);
     }
 
-    let step1 = ReduceProverStep1Elements {
+    // Build a "dummy" step1 with beta=Fr::zero() initially
+    let dummy_step1 = ReduceProverStep1Elements {
         c: cmt.c,
         d1: cmt.d1,
         d2: cmt.d2,
-        d1_l: d1l,
-        d1_r: d1r,
-        d2_l: d2l,
-        d2_r: d2r,
+        d1_l,
+        d1_r,
+        d2_l,
+        d2_r,
+        beta: Fr::from(0), // placeholder
     };
-    step1.append_to_transcript(transcript);
 
+    // Append partial data (which includes beta=0) to transcript
+    dummy_step1.append_to_transcript(transcript);
+
+    // Now get the real beta
     let beta = transcript.challenge_scalar::<Fr>();
 
-    // fold
+    // Create final step1 with the real beta
+    let step1 = ReduceProverStep1Elements {
+        beta,
+        ..dummy_step1
+    };
+    // We do NOT re-append step1 after setting beta
+
+    // Now fold v1,v2 using beta
     let beta_inv = ark_ff::Field::inverse(&beta).unwrap();
-    let mut new_v1 = Vec::with_capacity(half);
-    let mut new_v2 = Vec::with_capacity(half);
+    let mut v1_folded = Vec::with_capacity(half);
+    let mut v2_folded = Vec::with_capacity(half);
     for i in 0..half {
-        let folded1 = v1l[i] + (v1r[i] * beta);
-        let folded2 = v2l[i] + (v2r[i] * beta_inv);
-        new_v1.push(folded1);
-        new_v2.push(folded2);
+        let folded1 = v1l[i] + v1r[i] * beta;
+        let folded2 = v2l[i] + v2r[i] * beta_inv;
+        v1_folded.push(folded1);
+        v2_folded.push(folded2);
     }
 
-    // Step2: c_plus = product of e(v1l[i], v2r[i]), c_minus = product e(v1r[i], v2l[i])
+    // Step2 partial: c_plus, c_minus
     let mut c_plus = GT::ONE;
     let mut c_minus = GT::ONE;
     for i in 0..half {
@@ -488,42 +513,62 @@ fn reduce_prover<TranscriptType: Transcript>(
         c_minus *= pair(v1r[i], v2l[i]);
     }
 
-    let step2 = ReduceProverStep2Elements {
+    // Build a "dummy" step2 with alpha=Fr::zero()
+    let dummy_step2 = ReduceProverStep2Elements {
         c_plus,
-        c_minus
+        c_minus,
+        alpha: Fr::from(0), // placeholder
     };
-    step2.append_to_transcript(transcript);
+    // Append partial data to transcript
+    dummy_step2.append_to_transcript(transcript);
 
+    // Now get the real alpha
     let alpha = transcript.challenge_scalar::<Fr>();
 
-    // build next commitment
-    let new_cmt = fold_commitment(cmt, &step1, &step2, alpha, beta, &pp.chi);
+    let step2 = ReduceProverStep2Elements {
+        alpha,
+        ..dummy_step2
+    };
+    // do NOT re-append step2 after storing alpha
 
-    let (mut s1_list, mut s2_list, sp) = reduce_prover(
-        &new_v1, 
-        &new_v2, 
-        pp, 
-        &new_cmt, 
+    // Now fold the commitment in GT
+    let alpha_inv = ark_ff::Field::inverse(&alpha).unwrap();
+    let mut c_prime = cmt.c;
+    c_prime *= pp.chi;
+    c_prime *= cmt.d2.pow(beta.0);
+    c_prime *= cmt.d1.pow(beta_inv.0);
+    c_prime *= c_plus.pow(alpha.0);
+    c_prime *= c_minus.pow(alpha_inv.0);
+
+    let mut d1_prime = d1_l.pow(alpha.0);
+    d1_prime *= d1_r;
+    let mut d2_prime = d2_l.pow(alpha_inv.0);
+    d2_prime *= d2_r;
+
+    let next_cmt = DoryCommitment {
+        c: c_prime,
+        d1: d1_prime,
+        d2: d2_prime,
+    };
+
+    // Recurse
+    let (mut step1_rest, mut step2_rest, sp) = reduce_prover(
+        &v1_folded,
+        &v2_folded,
+        pp,
+        &next_cmt,
         transcript
     );
-    let mut out1 = vec![step1];
-    out1.append(&mut s1_list);
-    let mut out2 = vec![step2];
-    out2.append(&mut s2_list);
-    (out1, out2, sp)
+
+    // Combine
+    let mut out_step1 = vec![step1];
+    out_step1.append(&mut step1_rest);
+    let mut out_step2 = vec![step2];
+    out_step2.append(&mut step2_rest);
+
+    (out_step1, out_step2, sp)
 }
 
-// Pairing-based final step
-fn scalar_product_prover_single(
-    g1: G1,
-    g2: G2,
-    _cmt: &DoryCommitment,
-    _pp: &DoryPublicParams
-) -> ScalarProductProofElements {
-    // dimension=1 => we just store e1=g1, e2=g2
-    // We'll do the real pairing check in "check_scalar_product_single"
-    ScalarProductProofElements { e1: g1, e2: g2 }
-}
 
 fn fold_commitment(
     cmt: &DoryCommitment,
@@ -563,30 +608,62 @@ fn fold_commitment(
 // Verification
 // ---------------------------------------------------------------------------
 
-fn verify_reducer<TranscriptType: Transcript>(
+fn verify_reducer<ProofTranscript: Transcript>(
     step1s: &[ReduceProverStep1Elements],
     step2s: &[ReduceProverStep2Elements],
     sp: &ScalarProductProofElements,
     pp: &DoryPublicParams,
     cmt: &DoryCommitment,
-    transcript: &mut TranscriptType
+    transcript: &mut ProofTranscript
 ) -> Result<(), ProofVerifyError> {
+    // If dimension=1 => check e(e1,e2)== cmt.c
     if step1s.is_empty() && step2s.is_empty() {
-        // dimension=1 => check final
-        if !check_scalar_product_single(sp, cmt, pp) {
+        // final check
+        let left = pair(sp.e1, sp.e2);
+
+        if left == sp.final_c {
+            return Ok(());
+        } else {
             return Err(ProofVerifyError::InternalError);
         }
-        return Ok(());
     }
+
+    // Read the first step1 from the proof
     let step1 = &step1s[0];
     step1.append_to_transcript(transcript);
-    let beta = transcript.challenge_scalar::<Fr>();
 
+    // The "real" beta is stored in step1.beta (the Prover's chosen challenge).
+    // So we do NOT call `transcript.challenge_scalar()` ourselves.
+    let beta = step1.beta;
+    let beta_inv = ark_ff::Field::inverse(&beta).ok_or(ProofVerifyError::InternalError)?;
+
+    // Step2
     let step2 = &step2s[0];
     step2.append_to_transcript(transcript);
-    let alpha = transcript.challenge_scalar::<Fr>();
+    // Similarly read alpha from step2
+    let alpha = step2.alpha;
+    let alpha_inv = ark_ff::Field::inverse(&alpha).ok_or(ProofVerifyError::InternalError)?;
 
-    let new_cmt = fold_commitment(cmt, step1, step2, alpha, beta, &pp.chi);
+    // Now fold c
+    let mut c_prime = cmt.c;
+    c_prime *= pp.chi;
+    c_prime *= cmt.d2.pow(beta.0);
+    c_prime *= cmt.d1.pow(beta_inv.0);
+    c_prime *= step2.c_plus.pow(alpha.0);
+    c_prime *= step2.c_minus.pow(alpha_inv.0);
+
+    let mut d1_prime = step1.d1_l.pow(alpha.0);
+    d1_prime *= step1.d1_r;
+    let mut d2_prime = step1.d2_l.pow(alpha_inv.0);
+    d2_prime *= step1.d2_r;
+
+    let new_cmt = DoryCommitment {
+        c: c_prime,
+        d1: d1_prime,
+        d2: d2_prime,
+    };
+
+    // Recurse
     verify_reducer(&step1s[1..], &step2s[1..], sp, pp, &new_cmt, transcript)
 }
 
